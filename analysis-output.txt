@@ -1,0 +1,23 @@
+== Incident 3: Al Noor, BR-CO-15 reproduction from samples/al-noor-fuel-nov-2026.xlsx ==
+ANF-2611-0041 lines=1 net=13749.75 vat=687.49 | OLD incl=14437.24 vs net+vat=14437.24 -> ok | NEW incl=14437.24 ok
+ANF-2611-0042 lines=3 net=14307.08 vat=715.35 | OLD incl=15022.42 vs net+vat=15022.43 -> REJECT BR-CO-15 | NEW incl=15022.43 ok
+ANF-2611-0043 lines=2 net=18684.00 vat=934.20 | OLD incl=19618.20 vs net+vat=19618.20 -> ok | NEW incl=19618.20 ok
+ANF-2611-0044 lines=4 net=11254.84 vat=562.75 | OLD incl=11817.57 vs net+vat=11817.59 -> REJECT BR-CO-15 | NEW incl=11817.59 ok
+ANF-2611-0045 lines=1 net=11283.30 vat=564.17 | OLD incl=11847.47 vs net+vat=11847.47 -> ok | NEW incl=11847.47 ok
+ANF-2611-0046 lines=2 net=5343.80 vat=267.20 | OLD incl=5610.99 vs net+vat=5611.00 -> REJECT BR-CO-15 | NEW incl=5611.00 ok
+
+== Incident 5: Ghaf date cell types ==
+row 2: type=s fmt='General' value='13/11/2026'
+row 3: type=s fmt='General' value='13/11/2026'
+row 4: type=s fmt='General' value='13/11/2026'
+row 5: type=s fmt='General' value='13/11/2026'
+row 6: type=s fmt='General' value='14/11/2026'
+row 7: type=s fmt='General' value='14/11/2026'
+row 8: type=s fmt='General' value='14/11/2026'
+row 9: type=s fmt='General' value='15/11/2026'
+
+== Incident 4: Sahara, ASP limiter simulation (burst 8, 2/s, 4 workers, ~15ms per call) ==
+invoices=40 accepted=8 throttled(429)=32  -> 32 stay 'Submitted' with empty ASP reference
+
+== Incident 1: Oasis timing ==
+rows=600 distinct buyers=5; one SMP lookup/row x 200 ms = 120s sequential; proxy timeout 60s

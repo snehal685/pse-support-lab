@@ -1,0 +1,184 @@
+diff -ru /tmp/claude-0/-home-claude/39e43553-6e4b-5c84-8c6d-9c20941e4568/scratchpad/b/pse-support-lab-main/services/api/internal/directory/directory.go pse-support-lab/services/api/internal/directory/directory.go
+--- /tmp/claude-0/-home-claude/39e43553-6e4b-5c84-8c6d-9c20941e4568/scratchpad/b/pse-support-lab-main/services/api/internal/directory/directory.go	2026-11-13 09:57:44.000000000 +0000
++++ pse-support-lab/services/api/internal/directory/directory.go	2026-11-14 07:55:00.795227633 +0000
+@@ -7,22 +7,49 @@
+ 	"io"
+ 	"net/http"
+ 	"net/url"
++	"sync"
+ 	"time"
+ 
+ 	"invoicely/api/internal/metrics"
+ )
+ 
++type cached struct {
++	registered bool
++	expires    time.Time
++}
++
+ type Client struct {
+ 	baseURL string
+ 	http    *http.Client
++	mu      sync.Mutex
++	cache   map[string]cached
+ }
+ 
++const cacheTTL = 10 * time.Minute
++
+ func New(baseURL string) *Client {
+-	return &Client{baseURL: baseURL, http: &http.Client{Timeout: 5 * time.Second}}
++	return &Client{baseURL: baseURL, http: &http.Client{Timeout: 5 * time.Second}, cache: map[string]cached{}}
+ }
+ 
+ // IsRegistered reports whether a Peppol participant id can receive invoices.
+ func (c *Client) IsRegistered(ctx context.Context, participantID string) (bool, error) {
++	// A file repeats the same few buyers on every line; look each one up once.
++	c.mu.Lock()
++	if e, ok := c.cache[participantID]; ok && time.Now().Before(e.expires) {
++		c.mu.Unlock()
++		return e.registered, nil
++	}
++	c.mu.Unlock()
++	registered, err := c.lookup(ctx, participantID)
++	if err == nil {
++		c.mu.Lock()
++		c.cache[participantID] = cached{registered, time.Now().Add(cacheTTL)}
++		c.mu.Unlock()
++	}
++	return registered, err
++}
++
++func (c *Client) lookup(ctx context.Context, participantID string) (bool, error) {
+ 	start := time.Now()
+ 	result := "error"
+ 	defer func() {
+diff -ru /tmp/claude-0/-home-claude/39e43553-6e4b-5c84-8c6d-9c20941e4568/scratchpad/b/pse-support-lab-main/services/api/internal/importer/sources.go pse-support-lab/services/api/internal/importer/sources.go
+--- /tmp/claude-0/-home-claude/39e43553-6e4b-5c84-8c6d-9c20941e4568/scratchpad/b/pse-support-lab-main/services/api/internal/importer/sources.go	2026-11-13 09:57:44.000000000 +0000
++++ pse-support-lab/services/api/internal/importer/sources.go	2026-11-14 07:55:00.795329094 +0000
+@@ -28,10 +28,24 @@
+ 	return &SourceCache{entries: map[string]*Source{}}
+ }
+ 
++// maxSources bounds memory: each entry holds the raw file, the parsed workbook and
++// every mapped invoice. Unbounded, this grew until the 128 MB container was OOM-killed.
++const maxSources = 10
++
+ func (c *SourceCache) Put(importID string, s *Source) {
+ 	s.StoredAt = time.Now()
+ 	c.mu.Lock()
+ 	c.entries[importID] = s
++	for len(c.entries) > maxSources {
++		var oldestID string
++		var oldest time.Time
++		for id, e := range c.entries {
++			if oldestID == "" || e.StoredAt.Before(oldest) {
++				oldestID, oldest = id, e.StoredAt
++			}
++		}
++		delete(c.entries, oldestID)
++	}
+ 	c.mu.Unlock()
+ }
+ 
+diff -ru /tmp/claude-0/-home-claude/39e43553-6e4b-5c84-8c6d-9c20941e4568/scratchpad/b/pse-support-lab-main/services/api/internal/pint/pint.go pse-support-lab/services/api/internal/pint/pint.go
+--- /tmp/claude-0/-home-claude/39e43553-6e4b-5c84-8c6d-9c20941e4568/scratchpad/b/pse-support-lab-main/services/api/internal/pint/pint.go	2026-11-13 09:57:44.000000000 +0000
++++ pse-support-lab/services/api/internal/pint/pint.go	2026-11-14 07:55:00.793294529 +0000
+@@ -156,7 +156,7 @@
+ // computeTotals builds the VAT breakdown and document totals.
+ func computeTotals(lines []Line) ([]TaxSubtotal, Totals) {
+ 	byCategory := map[string]*TaxSubtotal{}
+-	var net, vat, gross float64
++	var net, vat float64
+ 	for _, l := range lines {
+ 		s, ok := byCategory[l.VATCategory]
+ 		if !ok {
+@@ -168,7 +168,6 @@
+ 
+ 		net += l.NetAmount
+ 		vat += l.VATAmount
+-		gross += l.Quantity * l.UnitPrice * (1 + l.VATRate/100)
+ 	}
+ 	subtotals := make([]TaxSubtotal, 0, len(byCategory))
+ 	for _, s := range byCategory {
+@@ -176,6 +175,10 @@
+ 		s.TaxAmount = round2(s.TaxAmount)
+ 		subtotals = append(subtotals, *s)
+ 	}
++	// Totals must satisfy BR-CO-15: inclusive = exclusive + VAT, in whole fils.
++	// (Previously gross was summed from unrounded qty x price x (1+rate), which
++	// drifts by 0.01 from the rounded net + VAT on multi-line fuel invoices.)
++	gross := round2(net) + round2(vat)
+ 	sort.Slice(subtotals, func(i, j int) bool { return subtotals[i].Category < subtotals[j].Category })
+ 	return subtotals, Totals{
+ 		LineExtensionAmount: round2(net),
+diff -ru /tmp/claude-0/-home-claude/39e43553-6e4b-5c84-8c6d-9c20941e4568/scratchpad/b/pse-support-lab-main/services/api/internal/submit/submit.go pse-support-lab/services/api/internal/submit/submit.go
+--- /tmp/claude-0/-home-claude/39e43553-6e4b-5c84-8c6d-9c20941e4568/scratchpad/b/pse-support-lab-main/services/api/internal/submit/submit.go	2026-11-13 09:57:44.000000000 +0000
++++ pse-support-lab/services/api/internal/submit/submit.go	2026-11-14 07:55:00.794785929 +0000
+@@ -29,6 +29,7 @@
+ type Response struct {
+ 	StatusCode int
+ 	Body       []byte
++	RetryAfter string
+ }
+ 
+ // Send posts one invoice payload on behalf of a sender.
+@@ -49,7 +50,7 @@
+ 		return nil, err
+ 	}
+ 	metrics.ASPResponses.WithLabelValues(strconv.Itoa(resp.StatusCode)).Inc()
+-	return &Response{StatusCode: resp.StatusCode, Body: body}, nil
++	return &Response{StatusCode: resp.StatusCode, Body: body, RetryAfter: resp.Header.Get("Retry-After")}, nil
+ }
+ 
+ // Submitter runs a pool of workers that take invoice ids from a queue.
+@@ -91,6 +92,30 @@
+ 	s.log.Info("submission workers started", "workers", s.workers)
+ }
+ 
++const maxRateLimitRetries = 8
++
++// sendWithBackoff honours the ASP fair-use limit: on HTTP 429 the document was not
++// received, so wait for Retry-After and send it again.
++func (s *Submitter) sendWithBackoff(ctx context.Context, id, number, sender string, payload []byte) (*Response, error) {
++	for attempt := 0; ; attempt++ {
++		resp, err := s.asp.Send(ctx, sender, payload)
++		if err != nil || resp.StatusCode != http.StatusTooManyRequests || attempt >= maxRateLimitRetries {
++			return resp, err
++		}
++		wait := time.Second
++		if n, convErr := strconv.Atoi(resp.RetryAfter); convErr == nil && n > 0 {
++			wait = time.Duration(n) * time.Second
++		}
++		s.log.Warn("asp rate limited, will resend", "invoice_id", id, "invoice_number", number,
++			"retry_after_s", wait.Seconds(), "attempt", attempt+1)
++		select {
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		case <-time.After(wait):
++		}
++	}
++}
++
+ type aspError struct {
+ 	Rule    string `json:"rule"`
+ 	Message string `json:"message"`
+@@ -117,7 +142,7 @@
+ 	}
+ 
+ 	start := time.Now()
+-	resp, err := s.asp.Send(ctx, inv.SellerPeppolID, inv.Payload)
++	resp, err := s.sendWithBackoff(ctx, id, inv.InvoiceNumber, inv.SellerPeppolID, inv.Payload)
+ 	if err != nil {
+ 		s.log.Error("asp request failed", "invoice_id", id, "invoice_number", inv.InvoiceNumber, "error", err)
+ 		metrics.Submissions.WithLabelValues("failed").Inc()
+@@ -149,7 +174,9 @@
+ 		if err := s.store.MarkRejected(ctx, id, "asp", errs, resp.Body, detail); err != nil {
+ 			s.log.Error("update status", "invoice_id", id, "error", err)
+ 		}
+-	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
++	default:
++		// 429 after all retries, 5xx, or anything unexpected: never leave the invoice
++		// in Submitted. Failed is retryable from the portal.
+ 		metrics.Submissions.WithLabelValues("failed").Inc()
+ 		_ = s.store.SetStatus(ctx, id, store.StatusFailed, fmt.Sprintf("ASP returned HTTP %d", resp.StatusCode))
+ 	}
